@@ -26,16 +26,6 @@ require_once "functions.php";
 require_once "updates.php";
 require_once "form.php";
 
-// Check for new version of plugin
-require 'plugin-update-checker/plugin-update-checker.php';
-$className = PucFactory::getLatestClassVersion('PucGitHubChecker');
-$myUpdateChecker = new $className(
-    'https://github.com/ea-foundation/eas-donation-processor',
-    __FILE__,
-    'master'
-);
-$myUpdateChecker->setAccessToken('93a8387a061d14040a5932e12ef31d90a1be419a'); // read only
-
 // Add short code for donation form
 add_shortcode('donationForm','getDonationForm');
 
@@ -127,8 +117,8 @@ function eas_json_settings_editor()
 add_action('wp_enqueue_scripts', 'register_donation_styles');
 function register_donation_styles()
 {
-    wp_register_style('bootstrap', '//maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css');
-    wp_enqueue_style('bootstrap');
+    wp_register_style('bootstrap-scoped', plugins_url('eas-donation-processor/css/scoped-bootstrap.min.css'));
+    wp_enqueue_style('bootstrap-scoped');
     wp_register_style('donation-plugin-css', plugins_url('eas-donation-processor/css/form.css'), array(), EAS_ASSET_VERSION);
     wp_enqueue_style('donation-plugin-css');
     wp_register_style('donation-combobox-css', plugins_url('eas-donation-processor/css/bootstrap-combobox.css'), array(), EAS_ASSET_VERSION);
