@@ -47,10 +47,12 @@ function getDonationForm($atts, $content = null)
         }
     }
 
-    // Get Stripe public keys
-    $stripeKeys = array();
+    // Get Stripe public keys and PayPal client IDs
+    $stripeKeys      = array();
+    $paypalClientIds = array();
     foreach ($easForms as $formName => $form) {
-        $stripeKeys[$formName] = getStripePublicKeys($form);
+        $stripeKeys[$formName]      = getStripePublicKeys($form);
+        $paypalClientIds[$formName] = getPayPalClientIds($form);
     }
 
     // Get tax deduction labels
@@ -62,6 +64,7 @@ function getDonationForm($atts, $content = null)
         'ajax_endpoint'         => admin_url('admin-ajax.php'),
         'amount_patterns'       => $amountPatterns,
         'stripe_public_keys'    => $stripeKeys,
+        'paypal_client_ids'     => $paypalClientIds,
         'tax_deduction_labels'  => $taxDeductionLabels,
         'organization'          => $GLOBALS['easOrganization'],
         'currency2country'      => $GLOBALS['currency2country'],

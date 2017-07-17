@@ -285,6 +285,7 @@ class EasDonationProcessorOptionsPage
                 jQuery('#donation-setting-form').submit(function() {
                     // Sringify JSON and save it
                     try {
+                        // Validate JSON
                         eval('(' + JSON.stringify(editor.get()) + ')');
                     } catch (e) {
                         alert(e);

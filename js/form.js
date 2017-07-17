@@ -462,6 +462,10 @@ jQuery(document).ready(function($) {
  */
 paypal.Button.render({
     env: easMode == 'sandbox' ? 'sandbox' : 'production',
+    client: {
+        sandbox:    'AUk1fPpMzpKLR_SOJRUlNIL7NicE2-XN7waPIJVbGufuR_j6udCcTmfi5Z3cljsCdBgMDq8q_C0j64du',
+        production: '<insert production client id>'
+    },
     commit: true,
     style: {
         label: 'checkout',  // checkout | credit | pay
@@ -469,23 +473,54 @@ paypal.Button.render({
         shape: 'pill',      // pill | rect
         color: 'blue'       // gold | blue | silver
     },
-    payment: function() {
+    payment: function(data, actions) {
         // Close modal
         jQuery('#PayPalModal').modal('hide');
 
-        // Send form
-        return new paypal.Promise(function(resolve, reject) {
-            jQuery('form#donationForm').ajaxSubmit({
-                success: function(responseText) {
-                    var response = JSON.parse(responseText);
-                    if (!('success' in response) || !response['success']) {
-                        var message = 'error' in response ? response['error'] : responseText;
-                        alert(message);
-                        return;
+        // Start payment flow
+        return actions.payment.create({
+            payment: {
+                transactions: [
+                    {
+                        amount: {
+                            total: getDonationAmount(),
+                            currency: getDonationCurrencyIsoCode()
+                        }
                     }
+                ]
+            }
+        });
+    },
+    onAuthorize: function(data) {
+        // Show spinner on form
+        showSpinnerOnLastButton();
 
-                    // Resolve payment
-                    resolve(response.paymentID);
+        // Add paymentID to form
+        var paymentIDInput = jQuery('<input type="hidden" name="paymentID">').val(data.paymentID);
+        var payerIDInput   = jQuery('<input type="hidden" name="payerID">').val(data.payerID);
+
+        // Execute payment
+        jQuery('form#donationForm')
+            .append(paymentIDInput)
+            .append(payerIDInput)
+            .ajaxSubmit({
+                success: function(responseText) {
+                    try {
+                        var response = JSON.parse(responseText);
+                        if (!('success' in response) || !response['success']) {
+                            var message = 'error' in response ? response['error'] : responseText;
+                            throw new Error(message);
+                        }
+
+                        // Everything worked! Change glyphicon from "spinner" to "OK" and go to confirmation page
+                        showConfirmation('paypal');
+                    } catch (err) {
+                        // Something went wrong, show on confirmation page
+                        alert(err.message);
+
+                        // Enable buttons
+                        lockLastStep(false);
+                    }
                 },
                 error: function(err) {
                     // Should only happen on internal server error
@@ -495,33 +530,9 @@ paypal.Button.render({
                     lockLastStep(false);
                 }
             });
-        });
-    },
-    onAuthorize: function(data) {
-        // Show spinner on form
-        showSpinnerOnLastButton();
 
         // Lock last step
         lockLastStep(true);
-
-        // Execute payment
-        jQuery.post(wordpress_vars.ajax_endpoint, { action: "paypal_execute", paymentID: data.paymentID, payerID: data.payerID })
-            .done(function(responseText) {
-                var response = JSON.parse(responseText);
-                if (!('success' in response) || !response['success']) {
-                    var message = 'error' in response ? response['error'] : responseText;
-                    lockLastStep(false);
-                    alert(message);
-                    return;
-                }
-
-                // Everything worked. Show confirmation.
-                showConfirmation('paypal');
-            })
-            .fail(function(err)  {
-                alert('An error occured: ' + err);
-                lockLastStep(false);
-            });
     },
     onCancel: function(data) {
         lockLastStep(false);
@@ -783,7 +794,7 @@ function handleBankTransferDonation()
 function handlePayPalDonation()
 {
     // Change action input
-    jQuery('form#donationForm input[name=action]').val('eas_redirect');
+    jQuery('form#donationForm input[name=action]').val('eas_donate');
 
     // Open modal
     jQuery('#PayPalModal').modal('show');

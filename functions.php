@@ -164,6 +164,17 @@ function processDonation()
 
             // Prepare response
             $response = array('success' => true);
+        } else if ($donation['type'] == "PayPal") {
+            // Make sure we have the PaymentID
+            if (empty($_POST['paymentID'])|| empty($_POST['payerID'])) {
+                throw new \Exception("No paymentID/payerID sent");
+            }
+
+            // Handle payment
+            handlePayPalPayment($donation, $_POST['paymentID'], $_POST['payerID']);
+
+            // Prepare response
+            $response = array('success' => true);
         } else if ($donation['type'] == "Bank Transfer") {
             // Check honey pot (confirm email)
             checkHoneyPot($_POST);
@@ -1314,14 +1325,11 @@ function preparePaypalDonation(array $post)
  *
  * @return string HTML with script that terminates the PayPal flow and shows the thank you step
  */
-function executePaypalDonation()
+function handlePayPalPayment(array $donation, $paymentID, $payerID)
 {
     try {
         // Load settings
         loadSettings();
-
-        // Prepare hook
-        $donation = getDonationFromSession();
 
         // Get API context
         $apiContext = getPayPalApiContext(
@@ -1333,10 +1341,10 @@ function executePaypalDonation()
         );
 
         // Execute payment
-        $paymentId = $_POST['paymentID'];
+        $paymentId = $paymentID;
         $payment   = \PayPal\Api\Payment::get($paymentId, $apiContext);
         $execution = new \PayPal\Api\PaymentExecution();
-        $execution->setPayerId($_POST['payerID']);
+        $execution->setPayerId($payerID);
         $payment->execute($execution, $apiContext);
 
         // Trigger web hooks
@@ -1350,6 +1358,11 @@ function executePaypalDonation()
 
         // Send response
         die(json_encode(array('success' => true)));
+    } catch (\PayPal\Exception\PayPalConnectionException $ex) {
+        die(json_encode(array(
+            'success' => false,
+            'error'   => "An error occured and your donation could not be processed (" .  $ex->getData() . "). Please contact us.",
+        )));
     } catch (\Exception $ex) {
         die(json_encode(array(
             'success' => false,
