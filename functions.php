@@ -75,8 +75,9 @@ function getDonationFromPost()
         'address'     => get($post['address'], ''),
         'zip'         => get($post['zip'], ''),
         'city'        => get($post['city'], ''),
-        'country'     => getEnglishNameByCountryCode(get($post['country'], '')),
+        'country'     => get($post['country'], ''),
         'comment'     => get($post['comment'], ''),
+        'account'     => get($post['account'], ''),
         'anonymous'   => get($post['anonymous'], false),
         'mailinglist' => get($post['mailinglist'], false),
     );
@@ -113,7 +114,7 @@ function prepareRedirect()
         // Output
         switch ($post['payment']) {
             case "PayPal":
-                $response = preparePaypalDonation($post);
+                $response = preparePayPalDonation($post);
                 break;
             case "Skrill":
                 $response = prepareSkrillDonation($post);
@@ -125,7 +126,7 @@ function prepareRedirect()
                 $response = prepareBitPayDonation($post);
                 break;
             default:
-                throw new \Exception('Payment method is invalid.');
+                throw new \Exception('Payment method ' . $post['payment'] . ' is invalid');
         }
 
         // Return response
@@ -158,19 +159,29 @@ function processDonation()
             if (empty($_POST['stripeToken']) || empty($_POST['stripePublicKey'])) {
                 throw new \Exception("No Stripe token sent");
             }
+
+            // Handle payment
             handleStripePayment($donation, $_POST['stripeToken'], $_POST['stripePublicKey']);
+
+            // Prepare response
+            $response = array('success' => true);
         } else if ($donation['type'] == "Bank Transfer") {
             // Check honey pot (confirm email)
             checkHoneyPot($_POST);
 
-            handleBankTransferPayment($donation);
+            // Handle payment
+            $reference = handleBankTransferPayment($donation);
+
+            // Prepare response
+            $response = array(
+                'success'   => true,
+                'reference' => $reference,
+            );
         } else {
-            throw new \Exception('Payment method is invalid.');
+            throw new \Exception('Payment method is invalid');
         }
 
-        die(json_encode(array(
-            'success' => true,
-        )));
+        die(json_encode($response));
     } catch (\Exception $e) {
         die(json_encode(array(
             'success' => false,
@@ -224,7 +235,7 @@ function handleStripePayment($donation, $token, $publicKey)
             $plan = getStripePlan($amountInt, $donation['currency']);
 
             // Subscribe customer to plan
-            \Stripe\Subscription::create(array(
+            $subscription = \Stripe\Subscription::create(array(
                 'customer' => $customer->id,
                 'plan'     => $plan,
                 'metadata' => array(
@@ -232,6 +243,9 @@ function handleStripePayment($donation, $token, $publicKey)
                     'purpose' => $donation['purpose'],
                 ),
             ));
+
+            // Add vendor reference ID
+            $donation['vendor_subscription_id'] = $subscription->id;
         } else {
             // Make one-time charge
             $charge = \Stripe\Charge::create(array(
@@ -244,7 +258,13 @@ function handleStripePayment($donation, $token, $publicKey)
                     'purpose' => $donation['purpose'],
                 ),
             ));
+
+            // Add vendor transaction ID
+            $donation['vendor_transaction_id'] = $charge->id;
         }
+
+        // Add customer ID
+        $donation['vendor_customer_id'] = $customer->id;
 
         // Trigger web hooks
         triggerWebHooks($donation);
@@ -313,9 +333,14 @@ function bindFormData(Eas\Donation $donation)
  * Process bank transfer payment (simply log it)
  *
  * @param array $donation Donation form data
+ * @return string Reference number
  */
 function handleBankTransferPayment(array $donation)
 {
+    // Generate reference number and add to donation
+    $reference             = getBankTransferReference($donation['form'], get($donation['purpose']));
+    $donation['reference'] = $reference;
+
     // Trigger web hooks
     triggerWebHooks($donation);
 
@@ -324,6 +349,8 @@ function handleBankTransferPayment(array $donation)
 
     // Send emails
     sendEmails($donation);
+
+    return $reference;
 }
 
 /**
@@ -352,6 +379,14 @@ function triggerLoggingWebHooks($donation)
     // Get form and mode
     $form = get($donation['form'], '');
     $mode = get($donation['mode'], '');
+
+    // Unset reqId (not needed)
+    unset($donation['reqId']);
+
+    // Translate country code to English
+    if (!empty($donation['country'])) {
+        $donation['country'] = getEnglishNameByCountryCode($donation['country']);
+    }
 
     // Trigger hooks for Zapier
     if (isset($GLOBALS['easForms'][$form]["webhook.logging.$mode"])) {
@@ -474,7 +509,8 @@ function getBestPaymentProviderSettings(
     }
 
     // Extract settings of the form we're talking about
-    $formSettings = $GLOBALS['easForms'][$form];
+    $formSettings      = $GLOBALS['easForms'][$form];
+    $countryCompulsory = get($formSettings['payment.extra_fields.country'], false);
 
     // Check all possible settings
     $hasCountrySetting  = true;
@@ -492,7 +528,7 @@ function getBestPaymentProviderSettings(
     $hasCountryOfCurrencySetting = false;
     $firstProperty               = $properties[0];
     $countryOfCurrency           = '';
-    if (!$taxReceiptNeeded && !$hasCurrencySetting) {
+    if (!$countryCompulsory && !$taxReceiptNeeded && !$hasCurrencySetting) {
         $countries = array_map('strtolower', getCountriesByCurrency($currency));
         foreach ($countries as $country) {
             if (isset($formSettings["payment.provider.{$provider}_$country.$mode.$firstProperty"])) {
@@ -513,7 +549,7 @@ function getBestPaymentProviderSettings(
         }
     }
 
-    if ($taxReceiptNeeded && $hasCountrySetting) {
+    if ($hasCountrySetting && ($taxReceiptNeeded || $countryCompulsory)) {
         // Use country specific settings
         return removePrefix($formSettings, $properties, "payment.provider.{$provider}_$country.$mode.");
     } else if ($hasCurrencySetting) {
@@ -560,7 +596,7 @@ function getPaymentProviderProperties($provider)
         case "stripe":
             return array("secret_key", "public_key");
         case "paypal":
-            return array("email_id", "api_username", "api_password", "api_signature", "application_id");
+            return array("client_id", "client_secret");
         case "gocardless":
             return array("access_token");
         case "bitpay":
@@ -612,10 +648,10 @@ function prepareGoCardlessDonation(array $post)
             'success' => true,
             'url'     => $redirectFlow->redirect_url,
         );
-    } catch (\Exception $e) {
+    } catch (\Exception $ex) {
         return array(
             'success' => false,
-            'error'   => "An error occured and your donation could not be processed (" .  $e->getMessage() . "). Please contact us.",
+            'error'   => "An error occured and your donation could not be processed (" .  $ex->getMessage() . "). Please contact us.",
         );
     }
 }
@@ -657,9 +693,6 @@ function processGoCardlessDonation()
             ]]
         );
 
-        // Get mandate ID
-        $mandateID = $redirectFlow->links->mandate;
-
         // Get other parameters
         $language  = $donation['language'];
         $url       = $donation['url'];
@@ -672,10 +705,10 @@ function processGoCardlessDonation()
 
         $payment = [
             "params" => [
-                "amount" => $amountInt, // in cents!
+                "amount"   => $amountInt, // in cents!
                 "currency" => $currency,
                 "links" => [
-                  "mandate" => $mandateID,
+                    "mandate" => $redirectFlow->links->mandate,
                 ],
                 "metadata" => [
                     "Form"     => $form,
@@ -701,6 +734,9 @@ function processGoCardlessDonation()
             $client->payments()->create($payment);
         }
 
+        // Add vendor customer ID to donation
+        $donation['vendor_customer_id'] = $redirectFlow->links->customer;
+
         // Trigger web hooks
         triggerWebHooks($donation);
 
@@ -710,9 +746,9 @@ function processGoCardlessDonation()
         // Send emails
         sendEmails($donation);
 
-        $script = "var mainWindow = (window == top) ? /* mobile */ opener : /* desktop */ parent; mainWindow.showConfirmation('gocardless'); mainWindow.hideModal('#goCardlessModal');";
+        $script = "var mainWindow = (window == top) ? /* mobile */ opener : /* desktop */ parent; mainWindow.showConfirmation('gocardless'); mainWindow.hideModal();";
     } catch (\Exception $e) {
-        $script = "var mainWindow = (window == top) ? /* mobile */ opener : /* desktop */ parent; alert('" . $e->getMessage() . "'); mainWindow.hideModal('#goCardlessModal');";
+        $script = "var mainWindow = (window == top) ? /* mobile */ opener : /* desktop */ parent; alert('" . $e->getMessage() . "'); mainWindow.hideModal();";
     }
 
     // Die and send script to close flow
@@ -833,8 +869,9 @@ function getBitpayClient($form, $mode, $taxReceipt, $currency, $country)
 
     // Generate token if first time
     if (!get_option($publicKeyId) || !get_option($privateKeyId) || !($tokenString = get_option($tokenId))) {
-        $label = $form . ' ' . $mode;
-        $token = generateBitpayToken($bitpay, $label);
+        $urlParts = parse_url(home_url());
+        $label    = $urlParts['host'];
+        $token    = generateBitpayToken($bitpay, $label);
     } else {
         $token = new \Bitpay\Token();
         $token->setToken($tokenString);
@@ -914,6 +951,17 @@ function getSkrillUrl($reqId, $post)
         'payment_methods'   => "WLT", // Skrill comes first
         'prepare_only'      => 1, // Return URL instead of form HTML
     );
+
+    // Add parameters for monthly donations
+    if ($post['frequency'] == 'monthly') {
+        $recStartDate = new \DateTime('+1 month');
+        $params['rec_amount']     = $post['amount'];
+        $params['rec_start_date'] = $recStartDate->format('d/m/Y');
+        $params['rec_period']     = 1;
+        $params['rec_cycle']      = 'month';
+    }
+
+    // Make options
     $options = array(
         'http' => array(
             'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
@@ -993,7 +1041,7 @@ function prepareBitPayDonation(array $post)
         }
 
         // Save invoice ID to session
-        $_SESSION['eas-invoice-id']  = $invoice->getId();
+        $_SESSION['eas-vendor-transaction-id']  = $invoice->getId();
 
         // Save user data to session
         setDonationDataToSession($post, $reqId);
@@ -1067,7 +1115,7 @@ function processSkrillLog()
 
     die('<!doctype html>
          <html lang="en"><head><meta charset="utf-8"><title>Closing flow...</title></head>
-         <body><script>parent.showConfirmation("skrill"); parent.hideModal("#skrillModal");</script></body></html>');
+         <body><script>parent.showConfirmation("skrill"); parent.hideModal();</script></body></html>');
 }
 
 /**
@@ -1088,18 +1136,18 @@ function processBitPayLog()
 
         // Get variables from session
         $donation   = getDonationFromSession();
-        $email      = $donation['email'];
-        $name       = $donation['name'];
-        $language   = $donation['language'];
         $form       = $donation['form'];
         $mode       = $donation['mode'];
         $taxReceipt = $donation['tax_receipt'];
         $currency   = $donation['currency'];
         $country    = $donation['country'];
 
+        // Add vendor transaction ID (BitPay invoice ID)
+        $donation['vendor_transaction_id'] = $_SESSION['eas-vendor-transaction-id'];
+
         // Make sure the payment is paid
         $client      = getBitpayClient($form, $mode, $taxReceipt, $currency, $country);
-        $invoice     = $client->getInvoice($_SESSION['eas-invoice-id']);
+        $invoice     = $client->getInvoice($_SESSION['eas-vendor-transaction-id']);
         $status      = $invoice->getStatus();
         $validStates = array(
             \Bitpay\Invoice::STATUS_PAID,
@@ -1124,7 +1172,7 @@ function processBitPayLog()
 
     die('<!doctype html>
          <html lang="en"><head><meta charset="utf-8"><title>Closing flow...</title></head>
-         <body><script>parent.showConfirmation("bitpay"); parent.hideModal("#bitPayModal");</script></body></html>');
+         <body><script>var mainWindow = (window == top) ? /* mobile */ opener : /* desktop */ parent; mainWindow.showConfirmation("bitpay"); mainWindow.hideModal();</script></body></html>');
 }
 
 /**
@@ -1146,7 +1194,7 @@ function getDonationFromSession()
         "email"       => $_SESSION['eas-email'],
         "name"        => $_SESSION['eas-name'],
         "currency"    => $_SESSION['eas-currency'],
-        "country"     => getEnglishNameByCountryCode($_SESSION['eas-country']),
+        "country"     => $_SESSION['eas-country'],
         "amount"      => $_SESSION['eas-amount'],
         "frequency"   => $_SESSION['eas-frequency'],
         "tax_receipt" => $_SESSION['eas-tax-receipt'],
@@ -1157,6 +1205,7 @@ function getDonationFromSession()
         "city"        => $_SESSION['eas-city'],
         "mailinglist" => $_SESSION['eas-mailinglist'],
         "comment"     => $_SESSION['eas-comment'],
+        "account"     => $_SESSION['eas-account'],
         "anonymous"   => $_SESSION['eas-anonymous'],
     );
 }
@@ -1164,7 +1213,7 @@ function getDonationFromSession()
 /**
  * Set donation data to session
  *
- * @param array $post   Form post
+ * @param array  $post  Form post
  * @param string $reqId Request ID (against replay attack)
  */
 function setDonationDataToSession(array $post, $reqId = null)
@@ -1191,7 +1240,133 @@ function setDonationDataToSession(array $post, $reqId = null)
     $_SESSION['eas-city']        = get($post['city'], '');
     $_SESSION['eas-mailinglist'] = isset($post['mailinglist']) && $post['mailinglist'] == 1;
     $_SESSION['eas-comment']     = get($post['comment'], '');
+    $_SESSION['eas-account']     = get($post['account'], '');
     $_SESSION['eas-anonymous']   = get($post['anonymous'], false);
+}
+
+/**
+ * Make PayPal payment (= one-time payment)
+ *
+ * @param array $post
+ * @return PayPal\Api\Payment
+ */
+function createPayPalPayment(array $post)
+{
+    // Make payer
+    $payer = new \PayPal\Api\Payer();
+    $payer->setPaymentMethod("paypal");
+
+    // Make amount
+    $amount = new \PayPal\Api\Amount();
+    $amount->setCurrency($post['currency'])
+        ->setTotal($post['amount']);
+
+    // Make transaction
+    $transaction = new \PayPal\Api\Transaction();
+    $transaction->setAmount($amount)
+        ->setDescription($post['name'] . ' (' . $post['email'] . ')')
+        ->setInvoiceNumber(uniqid());
+
+    // Make redirect URLs
+    $returnUrl    = getAjaxEndpoint() . '?action=paypal_execute';
+    $redirectUrls = new \PayPal\Api\RedirectUrls();
+    $redirectUrls->setReturnUrl($returnUrl)
+        ->setCancelUrl($returnUrl);
+
+    // Make payment
+    $payment = new \PayPal\Api\Payment();
+    $payment->setIntent("sale")
+        ->setPayer($payer)
+        ->setTransactions(array($transaction))
+        ->setRedirectUrls($redirectUrls);
+
+    // Get API context end create payment
+    $apiContext = getPayPalApiContext(
+        $post['form'],
+        $post['mode'],
+        get($post['tax_receipt'], false),
+        $post['currency'],
+        $post['country']
+    );
+
+    return $payment->create($apiContext);
+}
+
+/**
+ * Make PayPal billing agreement (= recurring payment)
+ *
+ * @param array $post
+ * @return \PayPal\Api\Agreement
+ */
+function createPayPalBillingAgreement(array $post)
+{
+    // Make new plan
+    $plan = new \PayPal\Api\Plan();
+    $plan->setName('Monthly Donation')
+        ->setDescription('Monthly donation of ' . $post['currency'] . ' ' . $post['amount'])
+        ->setType('INFINITE');
+
+    // Make payment definition
+    $paymentDefinition = new \PayPal\Api\PaymentDefinition();
+    $paymentDefinition->setName('Regular Payments')
+        ->setType('REGULAR')
+        ->setFrequency('Month')
+        ->setFrequencyInterval('1')
+        ->setCycles('0')
+        ->setAmount(new \PayPal\Api\Currency(array('value' => $post['amount'], 'currency' => $post['currency'])));
+
+    // Make merchant preferences
+    $returnUrl           = getAjaxEndpoint() . '?action=paypal_execute';
+    $merchantPreferences = new \PayPal\Api\MerchantPreferences();
+    $merchantPreferences->setReturnUrl($returnUrl)
+        ->setCancelUrl($returnUrl)
+        ->setAutoBillAmount("yes")
+        ->setInitialFailAmountAction("CONTINUE")
+        ->setMaxFailAttempts("0");
+
+    // Put things together and create
+    $apiContext = getPayPalApiContext(
+        $post['form'],
+        $post['mode'],
+        get($post['tax_receipt'], false),
+        $post['currency'],
+        $post['country']
+    );
+    $plan->setPaymentDefinitions(array($paymentDefinition))
+        ->setMerchantPreferences($merchantPreferences)
+        ->create($apiContext);
+
+    // Activate plan
+    $patch = new \PayPal\Api\Patch();
+    $value = new \PayPal\Common\PayPalModel('{
+       "state":"ACTIVE"
+     }');
+    $patch->setOp('replace')
+        ->setPath('/')
+        ->setValue($value);
+    $patchRequest = new PayPal\Api\PatchRequest();
+    $patchRequest->addPatch($patch);
+    $plan->update($patchRequest, $apiContext);
+
+    // Make payer
+    $payer = new \PayPal\Api\Payer();
+    $payer->setPaymentMethod('paypal');
+
+    // Make a fresh plan
+    $planID = $plan->getId();
+    $plan   = new \PayPal\Api\Plan();
+    $plan->setId($planID);
+
+    // Make agreement
+    $agreement = new \PayPal\Api\Agreement();
+    $startDate = new \DateTime('+1 day'); // Activation can take up to 24 hours
+    $agreement->setName(__("Monthly Donation", "eas-donation-processor") . ': ' . $post['currency'] . ' ' . $post['amount'])
+        ->setDescription(__("Monthly Donation", "eas-donation-processor") . ': ' . $post['currency'] . ' ' . $post['amount'])
+        ->setStartDate($startDate->format('c'))
+        ->setPlan($plan)
+        ->setPayer($payer);
+
+    return $agreement->create($apiContext);
 }
 
 /**
@@ -1201,149 +1376,103 @@ function setDonationDataToSession(array $post, $reqId = null)
  * @param array $post
  * @return array
  */
-function preparePaypalDonation(array $post)
+function preparePayPalDonation(array $post)
 {
     try {
-        $form       = $post['form'];
-        $mode       = $post['mode'];
-        $language   = $post['language'];
-        $email      = $post['email'];
-        $name       = $post['name'];
-        $amount     = $post['amount'];
-        $currency   = $post['currency'];
-        $taxReceipt = get($post['tax_receipt'], false);
-        $country    = $post['country'];
-        $frequency  = $post['frequency'];
-        $returnUrl  = getAjaxEndpoint();
-        $reqId      = uniqid(); // Secret request ID. Needed to prevent replay attack
+        if ($post['frequency'] == 'monthly') {
+            $billingAgreement = createPayPalBillingAgreement($post);
 
-        // Get best Paypal account for donation
-        $paypalAccount = getBestPaymentProviderSettings("paypal", $form, $mode, $taxReceipt, $currency, $country);
+            // Save doantion to session
+            setDonationDataToSession($post);
 
-        $qsConnector = strpos('?', $returnUrl) ? '&' : '?';
-        $content = array(
-            "actionType"      => "PAY",
-            "returnUrl"       => $returnUrl . $qsConnector . "action=log&req=" . $reqId,
-            "cancelUrl"       => $returnUrl . $qsConnector . "action=log",
-            "requestEnvelope" => array(
-                "errorLanguage" => "en_US",
-                "detailLevel"   => "ReturnAll",
-            ),
-            "currencyCode"    => $currency,
-            "receiverList"    => array(
-                "receiver" => array(
-                    array(
-                        "email"  => $paypalAccount['email_id'],
-                        "amount" => $amount,
-                    )
-                )
-            )
-        );
+            // Parse approval link
+            $approvalLinkParts = parse_url($billingAgreement->getApprovalLink());
+            parse_str($approvalLinkParts['query'], $query);
 
-        $headers = array(
-            'X-PAYPAL-SECURITY-USERID: '      . $paypalAccount['api_username'],
-            'X-PAYPAL-SECURITY-PASSWORD: '    . $paypalAccount['api_password'],
-            'X-PAYPAL-SECURITY-SIGNATURE: '   . $paypalAccount['api_signature'],
-            'X-PAYPAL-DEVICE-IPADDRESS: '     . $_SERVER['REMOTE_ADDR'],
-            'X-PAYPAL-REQUEST-DATA-FORMAT: '  . 'JSON',
-            'X-PAYPAL-RESPONSE-DATA-FORMAT: ' . 'JSON',
-            'X-PAYPAL-APPLICATION-ID: '       . $paypalAccount['application_id'],
-        );
-
-        // Set Options for CURL
-        $curl = curl_init($GLOBALS['paypalPayKeyEndpoint'][$mode]);
-        curl_setopt($curl, CURLOPT_HEADER, false);
-        // Return Response to Application
-        curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-        // Execute call via http-POST
-        curl_setopt($curl, CURLOPT_POST, true);
-        // Set POST-Body
-        curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($content));
-        // Set headers
-        curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-        // WARNING: This option should NOT be "false"
-        // Otherwise the connection is not secured
-        // You can turn it of if you're working on the test-system with no vital data
-        // FIXME Remove when XAMPP problem is fixed
-        if ($mode == 'sandbox') {
-            curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
+            return array(
+                'success' => true,
+                'token'   => $query['token'],
+            );
         } else {
-            curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, true);
-        }
-        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
-        // Load list file with up-to-date certificate authorities
-        //curl_setopt($curl, CURLOPT_CAINFO, 'ssl/server.crt');
-        // CURL-Execute & catch response
-        $jsonResponse = curl_exec($curl);
-        // Get HTTP-Status, abort if Status != 200
-        $status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-        if ($status != 200) {
-            die(json_encode(array(
-                'success' => false,
-                'error'   => "Error: Call to " . $GLOBALS['paypalPayKeyEndpoint'][$mode] . " failed with status $status, " .
-                             "response " . $jsonResponse . ", curl_error " . curl_error($curl) . ", curl_errno " .
-                             curl_errno($curl) . ", HTTP-Status: " . $status,
-            )));
-        }
-        // Close connection
-        curl_close($curl);
+            $payment = createPayPalPayment($post);
 
-        //Convert response into an array and extract the payKey
-        $response = json_decode($jsonResponse, true);
-        if ($response['responseEnvelope']['ack'] != 'Success') {
-            die("Error: " . $response['error'][0]['message']);
+            // Save doantion to session
+            setDonationDataToSession($post);
+
+            return array(
+                'success'   => true,
+                'paymentID' => $payment->getId(),
+            );
         }
-
-        // Put user data in session
-        setDonationDataToSession($post, $reqId);
-
-        // Return pay key
-        return array(
-            'success' => true,
-            'paykey'  => $response['payKey'],
-        );
-    } catch (\Exception $e) {
+    } catch (\PayPal\Exception\PayPalConnectionException $ex) {
         return array(
             'success' => false,
-            'error'   => "An error occured and your donation could not be processed (" .  $e->getMessage() . "). Please contact us.",
+            'error'   => "An error occured and your donation could not be processed (" .  $ex->getData() . "). Please contact us.",
+        );
+    } catch (\Exception $ex) {
+        return array(
+            'success' => false,
+            'error'   => "An error occured and your donation could not be processed (" .  $ex->getMessage() . "). Please contact us.",
         );
     }
 }
 
 /**
- * AJAX endpoint for handling donation logging for PayPal.
- * User is forwarded here after successful Paypal transaction.
+ * AJAX endpoint for executing and logging PayPal donations.
  * Takes user data from session and triggers the web hooks.
  *
  * @return string HTML with script that terminates the PayPal flow and shows the thank you step
  */
-function processPaypalLog()
+function executePaypalDonation()
 {
-    // Load settings
-    loadSettings();
+    try {
+        // Load settings
+        loadSettings();
 
-    // Make sure it's the same user session
-    verifySession();
+        // Prepare hook
+        $donation = getDonationFromSession();
 
-    // Prepare hook
-    $donation = getDonationFromSession();
+        // Get API context
+        $apiContext = getPayPalApiContext(
+            $donation['form'],
+            $donation['mode'],
+            $donation['tax_receipt'],
+            $donation['currency'],
+            $donation['country']
+        );
 
-    // Trigger web hooks
-    triggerWebHooks($donation);
+        if (!empty($_POST['paymentID']) && !empty($_POST['payerID'])) {
+            // Execute payment (one-time)
+            $paymentId = $_POST['paymentID'];
+            $payment   = \PayPal\Api\Payment::get($paymentId, $apiContext);
+            $execution = new \PayPal\Api\PaymentExecution();
+            $execution->setPayerId($_POST['payerID']);
+            $payment->execute($execution, $apiContext);
+        } else if (!empty($_POST['token'])) {
+            // Execute billing agreement (monthly)
+            $agreement = new \PayPal\Api\Agreement();
+            $agreement->execute($_POST['token'], $apiContext);
+        } else {
+            throw new \Exception("An error occured. Payment aborted.");
+        }
 
-    // Save matching challenge donation post
-    saveMatchingChallengeDonationPost($donation);
+        // Trigger web hooks
+        triggerWebHooks($donation);
 
-    // Send emails
-    sendEmails($donation);
+        // Save matching challenge donation post
+        saveMatchingChallengeDonationPost($donation);
 
-    // Make sure the contents can be displayed inside iFrame
-    header_remove('X-Frame-Options');
+        // Send emails
+        sendEmails($donation);
 
-    // Die and send script to close flow
-    die('<!doctype html>
-         <html lang="en"><head><meta charset="utf-8"><title>Closing flow...</title></head>
-         <body><script>var mainWindow = (window == top) ? /* mobile */ opener : /* desktop */ parent; mainWindow.embeddedPPFlow.closeFlow(); mainWindow.showConfirmation("paypal"); close();</script></body></html>');
+        // Send response
+        die(json_encode(array('success' => true)));
+    } catch (\Exception $ex) {
+        die(json_encode(array(
+            'success' => false,
+            'error'   => $ex->getMessage(),
+        )));
+    }
 }
 
 /**
@@ -1496,6 +1625,9 @@ function sendConfirmationEmail(array $donation)
         $language      = !empty($donation['language']) ? strtolower($donation['language']) : null;
         $emailSettings = getLocalizedValue($GLOBALS['easForms'][$form]['finish.email'], $language);
 
+        // Add tax dedcution labels to donation
+        $donation += getTaxDeductionSettingsByDonation($donation);
+
         // Get email subject and text and pass it through twig
         $twig    = getTwig($form, $language);
         $subject = $twig->render('finish.email.subject', $donation);
@@ -1547,8 +1679,9 @@ function flattenSettings($settings, &$result, $parentKey = '')
     // Return scalar values, numeric arrays and special values
     if (!is_array($settings)
         || !hasStringKeys($settings)
-        // IMPORTANT: Add parameters here that should be overwritten completely in non-default forms
+        // IMPORTANT: Add parameters here that should be overridden completely in non-default forms
         || preg_match('/payment\.purpose$/', $parentKey)
+        || preg_match('/payment\.provider\.banktransfer\.accounts$/', $parentKey)
         || preg_match('/payment\.labels$/', $parentKey)
         || preg_match('/amount\.currency$/', $parentKey)
         || preg_match('/finish\.success_message$/', $parentKey)
@@ -2101,7 +2234,7 @@ function getTwig($form, $language = null)
     // Instantiate twig
     $loader = new Twig_Loader_Array($twigSettings);
     $twig   = new Twig_Environment($loader, array(
-        'autoescape' => $isHtml,
+        'autoescape' => $isHtml ? 'html' : false,
     ));
 
     // Save twig globally
@@ -2155,6 +2288,7 @@ function monolinguify(array $labels, $depth = 0)
  *
  * @return WP_REST_Response
  * @see loadTaxDeductionSettings
+ * @see getTaxDeductionSettingsByDonation
  */
 function serveTaxDeductionSettings()
 {
@@ -2176,11 +2310,45 @@ function serveTaxDeductionSettings()
 }
 
 /**
+ * Load tax deduction settings for donation
+ *
+ * @param array $donation
+ * @return array
+ * @see serveTaxDeductionSettings
+ * @see loadTaxDeductionSettings
+ */
+function getTaxDeductionSettingsByDonation(array $donation)
+{
+    $settings = array();
+
+    if ($taxDeductionSettings = loadTaxDeductionSettings($donation['form'])) {
+        $countries = !empty($donation['country']) ? ['default', strtolower($donation['country'])]                    : ['default'];
+        $types     = !empty($donation['type'])    ? ['default', str_replace(" ", "", strtolower($donation['type']))] : ['default']; // Payment provider
+        $purposes  = !empty($donation['purpose']) ? ['default', $donation['purpose']]                                : ['default'];
+
+        // Find best labels, more specific settings override more general settings
+        foreach ($countries as $country) {
+            foreach ($types as $type) {
+                foreach ($purposes as $purpose) {
+                    if (isset($taxDeductionSettings[$country][$type][$purpose])) {
+                        $settings = array_merge($settings, $taxDeductionSettings[$country][$type][$purpose]);
+                    }
+                }
+            }
+        }
+    }
+
+    return $settings;
+}
+
+/**
  * Load tax deduction settings
  *
  * @see returnTaxDeductionSettings()
  * @param string $form Form name
  * @return array|null
+ * @see serveTaxDeductionSettings
+ * @see getTaxDeductionSettingsByDonation
  */
 function loadTaxDeductionSettings($form)
 {
@@ -2222,9 +2390,99 @@ function loadTaxDeductionSettings($form)
     return $taxDeductionSettings ? monolinguify($taxDeductionSettings, 3) : null;
 }
 
+/**
+ * Get bank transfer token
+ *
+ * @param string $form        Form name
+ * @param string $prefix      Constitutes a separate block
+ * @param int    $length      Total length, without prefix and hyphens
+ * @param int    $blockLength Blocks are separated by a hyphen
+ * @param string $separator   Separates blocks
+ * @return string
+ */
+function getBankTransferReference($form, $prefix = '', $length = 8, $blockLength = 4, $separator = '-')
+{
+    $codeAlphabet = "ABCDEFGHJKLMNPQRTWXYZ"; // without I, O, V, U, S
+    $codeAlphabet.= "0123456789";
+    $max          = strlen($codeAlphabet);
+    $token        = "";
 
+    // Generate token
+    for ($i = 0; $i < $length; $i++) {
+        $token .= $codeAlphabet[rand(0, $max-1)];
+    }
 
+    // Chunk split token string
+    $tokenArray = str_split($token, $blockLength);
 
+    // Add prefix to token array
+    if (!empty($prefix)) {
+        // Check if reference number prefix is defined
+        if (
+            ($predefinedPrefix = get($GLOBALS['easForms'][$form]['payment.reference_number_prefix.' . $prefix])) ||
+            ($predefinedPrefix = get($GLOBALS['easForms'][$form]['payment.reference_number_prefix.default']))
+        ) {
+            $prefix = $predefinedPrefix;
+        }
+
+        array_unshift($tokenArray, strtoupper($prefix));
+    }
+
+    return join($separator, $tokenArray);
+}
+
+/**
+ * Get PayPal API context
+ *
+ * @param string $form
+ * @param string $mode
+ * @param bool   $taxReceipt
+ * @param string $currency
+ * @param string $country
+ * @return \PayPal\Rest\ApiContext
+ * @throws \Exception
+ */
+function getPayPalApiContext($form, $mode, $taxReceipt, $currency, $country)
+{
+    // Get best settings
+    $settings = getBestPaymentProviderSettings("paypal", $form, $mode, $taxReceipt, $currency, $country);
+    if (empty($settings['client_id']) || empty($settings['client_secret'])) {
+        throw new \Exception('One of the following is not set: client_id, client_secret');
+    }
+
+    $apiContext = new \PayPal\Rest\ApiContext(
+        new \PayPal\Auth\OAuthTokenCredential(
+            $settings['client_id'],
+            $settings['client_secret']
+        )
+    );
+
+    if ($mode == 'live') {
+        $apiContext->setConfig(array('mode' => 'live'));
+    }
+
+    return $apiContext;
+}
+
+/**
+ * Localize array keys
+ *
+ * @param array $array
+ * @return array
+ */
+function localizeKeys(array $array)
+{
+    $localizedArray = array();
+    foreach ($array as $account => $accountData) {
+        $localizedKeys = array_map(function($key) {
+            return __($key, "eas-donation-processor");
+        }, array_keys($accountData));
+
+        $localizedArray[$account] = array_combine($localizedKeys, array_values($accountData));
+    }
+
+    return $localizedArray;
+}
 
 
 

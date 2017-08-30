@@ -2,8 +2,9 @@
 /**
  * Plugin Name: EAS Donation Processor
  * Plugin URI: https://github.com/ea-foundation/eas-donation-processor
+ * GitHub Plugin URI: ea-foundation/eas-donation-processor
  * Description: Process donations
- * Version: 0.6.1
+ * Version: 0.9.0
  * Author: Naoki Peter
  * Author URI: http://0x1.ch
  * License: proprietary
@@ -15,10 +16,10 @@ defined('ABSPATH') or die('No script kiddies please!');
 define('EAS_PRIORITY', 12838790321);
 
 // Asset version
-define('EAS_ASSET_VERSION', '0.20');
+define('EAS_ASSET_VERSION', '0.28');
 
 // Load other files
-require_once 'vendor/autoload.php';
+require_once "vendor/autoload.php";
 require_once "_globals.php";
 require_once "_options.php";
 require_once "bitpay/EncryptedWPOptionStorage.php";
@@ -57,12 +58,12 @@ function eas_prepare_donation()
     prepareRedirect();
 }
 
-// Log Paypal transaction. User is redirected here after successful donation
-add_action("wp_ajax_nopriv_log", "eas_process_paypal_log");
-add_action("wp_ajax_log", "eas_process_paypal_log");
-function eas_process_paypal_log()
+// Execute and log Paypal transaction
+add_action("wp_ajax_nopriv_paypal_execute", "eas_process_paypal_execute");
+add_action("wp_ajax_paypal_execute", "eas_process_paypal_execute");
+function eas_process_paypal_execute()
 {
-    processPaypalLog();
+    executePaypalDonation();
 }
 
 // Process GoCardless donation
@@ -138,7 +139,7 @@ function register_donation_scripts()
     wp_register_script('donation-plugin-bootstrapjs', '//maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js', array('jquery'));
     wp_register_script('donation-plugin-jqueryformjs', '//malsup.github.io/jquery.form.js', array('jquery'));
     wp_register_script('donation-plugin-stripe', '//checkout.stripe.com/checkout.js');
-    wp_register_script('donation-plugin-paypal', '//www.paypalobjects.com/js/external/dg.js');
+    wp_register_script('donation-plugin-paypal', '//www.paypalobjects.com/api/checkout.js?data-version-4'); // The query string is actually supposed to be a separate attribute without value, see below
     wp_register_script('donation-combobox', plugins_url('eas-donation-processor/js/bootstrap-combobox.js'), array(), EAS_ASSET_VERSION);
     wp_register_script('donation-plugin-form', plugins_url('eas-donation-processor/js/form.js'), array('jquery', 'donation-plugin-stripe'), EAS_ASSET_VERSION);
 }
@@ -188,14 +189,26 @@ function create_doantion_post_type()
 }
 
 // Add settings link to plugins page
+$plugin = plugin_basename(__FILE__);
+add_filter("plugin_action_links_$plugin", 'plugin_add_settings_link');
 function plugin_add_settings_link($links)
 {
-    $settings_link = '<a href="options-general.php?page=eas-donation-settings">' . __( 'Settings' ) . '</a>';
-    array_push( $links, $settings_link );
+    $settings_link = '<a href="options-general.php?page=eas-donation-settings">' . __('Settings') . '</a>';
+    array_push($links, $settings_link);
     return $links;
 }
-$plugin = plugin_basename(__FILE__ );
-add_filter( "plugin_action_links_$plugin", 'plugin_add_settings_link' );
+
+// Set attribute data-version-4 for PayPal Checkout.js
+// Enable when data-version-5 is out
+/*add_filter('clean_url', 'unclean_url', 10, 3);
+function unclean_url($good_protocol_url, $original_url, $_context){
+    if (false !== strpos($original_url, '?data-version-4')){
+        remove_filter('clean_url', 'unclean_url', 10, 3);
+        $url_parts = parse_url($good_protocol_url);
+        return '//' . $url_parts['host'] . $url_parts['path'] . "' data-version-4 charset='UTF-8";
+    }
+    return $good_protocol_url;
+}*/
 
 add_action('admin_footer', function() { 
     /*

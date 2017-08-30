@@ -246,8 +246,9 @@ div#amount-item span.form-control-feedback {
     margin: 2px 0 0;
 }
 
-#wizard div#donor-extra-info .dropdown-menu {
-    max-height: 120px;
+#wizard div#donor-extra-info .dropdown-menu,
+#wizard div.donor-info .dropdown-menu {
+    max-height: 132px;
     overflow-y: auto;
 }
 
@@ -307,8 +308,16 @@ input#donor-country-auto {
     margin-top: -2px;
 }
 
+div#donation-confirmation div.alert {
+    text-align: center;
+    padding-top: 25px;
+    padding-bottom: 25px;
+}
+
 div#donation-confirmation div.response-icon {
-    width: 25px;
+    padding-bottom: 15px;
+    margin: auto;
+    line-height: 1.1;
 }
 
 div#payment-method-item span.form-control-feedback {
@@ -417,12 +426,12 @@ ul#frequency li:not(:last-child) {
     margin-right: 20px;
 }
 
-div#goCardlessModal .modal-body {
+div.eas-popup-modal .modal-body {
     text-align: center;
     padding: 40px 20px;
 }
 
-div#goCardlessModal .modal-body p {
+div.eas-popup-modal .modal-body p {
     text-align: left;
     font-size: initial;
 }

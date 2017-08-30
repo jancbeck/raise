@@ -56,6 +56,9 @@ function getDonationForm($atts, $content = null)
     // Get tax deduction labels
     $taxDeductionLabels = loadTaxDeductionSettings($name);
 
+    // Get bank accounts
+    $bankAccounts = localizeKeys(get($easSettings['payment.provider.banktransfer.accounts'], array()));
+
     // Localize script
     wp_localize_script('donation-plugin-form', 'wordpress_vars', array(
         'logo'                  => $logo,
@@ -63,6 +66,7 @@ function getDonationForm($atts, $content = null)
         'amount_patterns'       => $amountPatterns,
         'stripe_public_keys'    => $stripeKeys,
         'tax_deduction_labels'  => $taxDeductionLabels,
+        'bank_accounts'         => $bankAccounts,
         'organization'          => $GLOBALS['easOrganization'],
         'currency2country'      => $GLOBALS['currency2country'],
         'donate_button_once'    => __("Donate %currency-amount%", "eas-donation-processor"),
@@ -74,7 +78,7 @@ function getDonationForm($atts, $content = null)
     wp_enqueue_script('donation-plugin-bootstrapjs');
     wp_enqueue_script('donation-plugin-jqueryformjs');
     wp_enqueue_script('donation-plugin-stripe');
-    if (!empty($easSettings["payment.provider.paypal.$mode.email_id"])) {
+    if (!empty($easSettings["payment.provider.paypal.$mode.client_id"])) {
         wp_enqueue_script('donation-plugin-paypal');
     }
     wp_enqueue_script('donation-plugin-form');
@@ -104,10 +108,10 @@ function getDonationForm($atts, $content = null)
     // Handle redirection case after successful payment
     if (isset($_GET['success']) && $_GET['success'] == 'true') {
         // Set status to payed to prevent replay attacks on our logs
-        $checkoutCssClass = '';
+        $checkoutCssClass     = '';
         $confirmationCssClass = ' active';
     } else {
-        $checkoutCssClass = ' active';
+        $checkoutCssClass     = ' active';
         $confirmationCssClass = '';
     }
     ob_start();
@@ -121,16 +125,18 @@ function getDonationForm($atts, $content = null)
 
 <script>
     var easDonationConfig = {
-        formName:         "<?php echo $name ?>",
-        mode:             "<?php echo $mode ?>",
-        userCountry:      "<?php echo $userCountryCode ?>",
-        selectedCurrency: "<?php echo $preselectedCurrency ?>"
+        formName:          "<?= $name ?>",
+        mode:              "<?= $mode ?>",
+        userCountry:       "<?= $userCountryCode ?>",
+        selectedCurrency:  "<?= $preselectedCurrency ?>",
+        countryCompulsory: "<?= get($easSettings['payment.extra_fields.country'], false) ? true : false ?>"
     }
 </script>
 <input type="hidden" name="action" value="eas_donate"> <!-- ajax key -->
 <input type="hidden" name="form" value="<?php echo $name ?>" id="eas-form-name">
 <input type="hidden" name="mode" value="<?php echo $live ? 'live' : 'sandbox' ?>" id="eas-form-mode">
 <input type="hidden" name="language" value="<?php echo $language ?>" id="eas-form-language">
+<input type="hidden" name="account" value="" id="eas-form-account">
 
 <!-- Scrollable root element -->
 <div id="wizard">
@@ -261,7 +267,7 @@ function getDonationForm($atts, $content = null)
                         </label>
                     <?php endif; ?>
 
-                    <?php if (!empty($easSettings["payment.provider.paypal.$mode.email_id"])): ?>
+                    <?php if (!empty($easSettings["payment.provider.paypal.$mode.client_id"])): ?>
                         <!-- PayPal -->
                         <label for="payment-paypal" class="radio-inline">
                             <input type="radio" name="payment" value="PayPal" id="payment-paypal" <?php echo $checked ?: ''; $checked = false; ?>>
@@ -314,7 +320,7 @@ function getDonationForm($atts, $content = null)
                 </div>
 
                 <!-- Donate anonymously (matching campaigns) -->
-                <?php if (!empty($easSettings['campaign']) && !empty($easSettings['payment.extra_fields.anonymous']) && $easSettings['payment.extra_fields.anonymous']): ?>
+                <?php if (!empty($easSettings['campaign']) && get($easSettings['payment.extra_fields.anonymous'], false)): ?>
                 <div class="form-group donor-info" style="margin-top: -17px">
                     <div class="col-sm-offset-3 col-sm-9">
                         <div class="checkbox">
@@ -343,7 +349,7 @@ function getDonationForm($atts, $content = null)
                 </div>
 
                 <!-- Country (if necessary for tax deduction) -->
-                <?php if (!empty($easSettings['payment.extra_fields.country']) && $easSettings['payment.extra_fields.country']): ?>
+                <?php if (get($easSettings['payment.extra_fields.country'], false)): ?>
                 <div class="form-group required donor-info">
                     <label for="donor-country" class="col-sm-3 control-label"><?php _e('Country', 'eas-donation-processor') ?></label>
                     <div class="col-sm-9">
@@ -419,7 +425,7 @@ function getDonationForm($atts, $content = null)
                 <?php endif; endif; ?>
 
                 <!-- Comment -->
-                <?php if (!empty($easSettings['payment.extra_fields.comment']) && $easSettings['payment.extra_fields.comment']): ?>
+                <?php if (get($easSettings['payment.extra_fields.comment'], false)): ?>
                 <div class="form-group donor-info">
                     <label for="donor-comment" class="col-sm-3 control-label"><?php _e('Public comment', 'eas-donation-processor') ?> (<?php _e('optional', 'eas-donation-processor') ?>)</label>
                     <div class="col-sm-9">
@@ -531,9 +537,11 @@ function getDonationForm($atts, $content = null)
 
             <!-- Confirmation -->
             <div class="item<?php echo $confirmationCssClass ?>" id="donation-confirmation">
-                <div class="alert alert-success flexible">
-                    <div class"response-text">
-                        <span class="glyphicon glyphicon-ok-sign" aria-hidden="true"></span>
+                <div class="alert alert-success">
+                    <div class="response-icon">
+                        <img src="<?php echo plugins_url('images/ok.png', __FILE__) ?>" alt="Donation complete">
+                    </div>
+                    <div class="response-text">
                         <strong><span id="success-text"><?php echo esc_html(getLocalizedValue($easSettings["finish.success_message"])) ?></span></strong>
                     </div>
                 </div>
@@ -549,21 +557,25 @@ function getDonationForm($atts, $content = null)
 
 </form>
 
-<?php if (!empty($easSettings["payment.provider.paypal.$mode.email_id"])): ?>
-    <!-- PayPal Adaptive payment form -->
-    <form action="<?php echo $GLOBALS['paypalPaymentEndpoint'][$mode] ?>" target="PPDGFrame" class="standard hidden">
-        <input type="image" id="submitBtn" value="Pay with PayPal" src="https://www.paypalobjects.com/en_US/i/btn/btn_paynowCC_LG.gif">
-        <input id="type" type="hidden" name="expType" value="light">
-        <input id="paykey" type="hidden" name="paykey" value="">
-    </form>
-<?php    
-        wp_add_inline_script('donation-plugin-form', "var embeddedPPFlow = new PAYPAL.apps.DGFlow({trigger: 'submitBtn'});"); // append to scripts instead of inline because main JS is loaded at the end
-    endif;
-?>
+<?php if (!empty($easSettings["payment.provider.paypal.$mode.client_id"])): ?>
+    <!-- PayPal modal -->
+    <div id="PayPalModal" class="modal eas-modal eas-popup-modal fade" role="dialog" data-backdrop="static">
+        <div class="modal-dialog modal-sm">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="PayPalPopupButton"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+<?php endif; ?>
 
 <?php if (!empty($easSettings["payment.provider.gocardless.$mode.access_token"])): ?>
     <!-- GoCardless modal -->
-    <div id="goCardlessModal" class="modal eas-modal fade" role="dialog" data-backdrop="static">
+    <div id="GoCardlessModal" class="modal eas-modal eas-popup-modal fade" role="dialog" data-backdrop="static">
         <div class="modal-dialog modal-sm">
             <div class="modal-content">
                 <div class="modal-header">
@@ -571,17 +583,14 @@ function getDonationForm($atts, $content = null)
                     <button type="button" class="close" data-dismiss="modal">&times;</button>
                 </div>
                 <div class="modal-body">
-                    <div class="gc_popup_open hidden">
+                    <div class="eas_popup_open hidden">
                         <p><?php _e("Please continue the donation in the secure window that you've already opened.", "eas-donation-processor") ?></p>
-                        <button class="btn btn-primary" onclick="gcPopup.focus()">OK</button>
+                        <button class="btn btn-primary" onclick="easPopup.focus()">OK</button>
                     </div>
-                    <div class="gc_popup_closed">
-                        <button id="goCardlessPopupButton" class="btn btn-primary"><span class="glyphicon glyphicon-lock" style="margin-right: 5px" aria-hidden="true"></span><?php _e("Set up Direct Debit", "eas-donation-processor") ?></button>
+                    <div class="eas_popup_closed">
+                        <button id="GoCardlessPopupButton" class="btn btn-primary"><span class="glyphicon glyphicon-lock" style="margin-right: 5px" aria-hidden="true"></span><?php _e("Set up Direct Debit", "eas-donation-processor") ?></button>
                     </div>
                 </div>
-                <!-- <div class="modal-footer">
-                    <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
-                </div> -->
             </div>
         </div>
     </div>
@@ -589,21 +598,30 @@ function getDonationForm($atts, $content = null)
 
 <?php if (!empty($easSettings["payment.provider.bitpay.$mode.pairing_code"])): ?>
     <!-- Bitpay modal -->
-    <div id="bitPayModal" class="modal eas-modal eas-iframe-modal fade" role="dialog" data-backdrop="static">
-        <div class="modal-dialog">
+    <div id="BitPayModal" class="modal eas-modal eas-popup-modal fade" role="dialog" data-backdrop="static">
+        <div class="modal-dialog modal-sm">
             <div class="modal-content">
                 <div class="modal-header">
+                    <img src="<?php echo plugins_url('images/bitpay.png', __FILE__) ?>" alt="BitPay" height="16">
                     <button type="button" class="close" data-dismiss="modal">&times;</button>
                 </div>
-                <div class="modal-body"></div>
+                <div class="modal-body">
+                    <div class="eas_popup_open hidden">
+                        <p><?php _e("Please continue the donation in the secure window that you've already opened.", "eas-donation-processor") ?></p>
+                        <button class="btn btn-primary" onclick="easPopup.focus()">OK</button>
+                    </div>
+                    <div class="eas_popup_closed">
+                        <button id="BitPayPopupButton" class="btn btn-primary"><span class="glyphicon glyphicon-lock" style="margin-right: 5px" aria-hidden="true"></span><?php _e("Pay by Bitcoin", "eas-donation-processor") ?></button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 <?php endif; ?>
 
 <?php if (!empty($easSettings["payment.provider.skrill.$mode.merchant_account"])): ?>
-    <!-- Bitpay modal -->
-    <div id="skrillModal" class="modal eas-modal eas-iframe-modal fade" role="dialog" data-backdrop="static">
+    <!-- Skrill modal -->
+    <div id="SkrillModal" class="modal eas-modal eas-iframe-modal fade" role="dialog" data-backdrop="static">
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header">
