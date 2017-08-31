@@ -1179,18 +1179,22 @@ function updateTaxDeductionLabels()
  */
 function replaceTaxDeductionPlaceholders(label, country, paymentMethod, purpose, accountData)
 {
+    // Replace %country%
     if (!!country) {
         label = label.replace('%country%', jQuery('select#donor-country option[value=' + country.toUpperCase() + ']').text());
     }
 
+    // Replace %payment_method%
     if (!!paymentMethod) {
         label = label.replace('%payment_method%', paymentMethod);
     }
 
+    // Replace %purpose%
     if (!!purpose) {
         label = label.replace('%purpose%', purpose);
     }
 
+    // Replace %bank_account_formatted%
     if (!jQuery.isEmptyObject(accountData)) {
         var accountDataString = Object.keys(accountData).map(function(key, index) {
             return '<strong>' + key + '</strong>: ' + accountData[key];
